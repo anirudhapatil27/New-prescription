@@ -63,9 +63,11 @@ jobs:
           JSON
           npm install --no-audit --no-fund @capacitor/core@6.1.2 @capacitor/android@6.1.2
           npm install --no-audit --no-fund --save-dev @capacitor/cli@6.1.2
-          npm install --no-audit --no-fund html2pdf.js@0.10.3
-          test -s node_modules/html2pdf.js/dist/html2pdf.bundle.min.js
-          cp node_modules/html2pdf.js/dist/html2pdf.bundle.min.js www/html2pdf.bundle.min.js
+          npm install --no-audit --no-fund html2canvas@1.4.1 jspdf@2.5.2
+          test -s node_modules/html2canvas/dist/html2canvas.min.js
+          test -s node_modules/jspdf/dist/jspdf.umd.min.js
+          cp node_modules/html2canvas/dist/html2canvas.min.js www/html2canvas.min.js
+          cp node_modules/jspdf/dist/jspdf.umd.min.js www/jspdf.umd.min.js
           cat > capacitor.config.json <<'JSON'
           {"appId":"com.drpatil.digitalopd","appName":"Dr Patil Digital OPD","webDir":"www"}
           JSON
@@ -205,7 +207,7 @@ jobs:
           }
           JAVA
 
-      - name: Connect all V25 digital PDF buttons to real PDF generation
+      - name: Connect all V25 digital PDF buttons to flattened A4 PDF generation
         shell: bash
         run: |
           set -euo pipefail
@@ -214,129 +216,47 @@ jobs:
           import re
           p=Path('www/index.html')
           s=p.read_text(encoding='utf-8')
-          if 'id="dr-patil-pdf-generator-v2"' in s: raise SystemExit('Refusing duplicate PDF bridge injection')
-          tag='<script src="html2pdf.bundle.min.js"></script>\n'
-          if '</head>' not in s: raise SystemExit('V25 head closing tag missing')
-          s=s.replace('</head>',tag+'</head>',1)
-          bridge=r'''<script id="dr-patil-pdf-generator-v2">
+          if 'id="dr-patil-pdf-generator-v3"' in s: raise SystemExit('Duplicate flattened PDF injection')
+          tags='<script src="html2canvas.min.js"></script>\n<script src="jspdf.umd.min.js"></script>\n'
+          if '</head>' not in s or '</body>' not in s: raise SystemExit('V25 document structure incomplete')
+          s=s.replace('</head>',tags+'</head>',1)
+          bridge=r'''<script id="dr-patil-pdf-generator-v3">
           (function(){
             "use strict";
             var state="checking",badge=null,attempts=0,timer=null,busy=false;
-            function show(message,isError){
-              try{
-                if(!document.body)return;
-                if(!badge){badge=document.createElement('div');badge.id='dr-patil-pdf-status';badge.style.cssText='position:fixed;left:8px;right:8px;bottom:8px;z-index:2147483647;padding:10px 12px;border-radius:9px;color:#fff;font:13px/1.4 system-ui,sans-serif;box-shadow:0 2px 12px #0005;display:none;text-align:center';document.body.appendChild(badge);}
-                badge.textContent=message;badge.style.background=isError?'#9b1c1c':'#245b42';badge.style.display='block';
-              }catch(e){}
-            }
+            function show(message,isError){try{if(!document.body)return;if(!badge){badge=document.createElement('div');badge.id='dr-patil-pdf-status';badge.style.cssText='position:fixed;left:8px;right:8px;bottom:8px;z-index:2147483647;padding:10px 12px;border-radius:9px;color:#fff;font:13px/1.4 system-ui,sans-serif;box-shadow:0 2px 12px #0005;display:none;text-align:center';document.body.appendChild(badge);}badge.textContent=message;badge.style.background=isError?'#9b1c1c':'#245b42';badge.style.display='block';}catch(e){}}
             window.__drPatilPdfStatus=show;
-            // Diagnostic checkpoint 1: this banner must appear even if AndroidPrint is absent.
-            function diagnostics(){
-              var html2pdfReady=typeof window.html2pdf==='function';
-              var androidObject=!!window.AndroidPrint;
-              var pingReady=false;
-              try{pingReady=!!(androidObject&&typeof window.AndroidPrint.ping==='function'&&window.AndroidPrint.ping()==='DR_PATIL_PDF_BRIDGE_READY_V2');}catch(e){}
-              window.__drPatilPdfDiagnostics={javascriptLoaded:true,html2pdfLoaded:html2pdfReady,androidObjectPresent:androidObject,androidPingReady:pingReady,checkedAt:new Date().toISOString()};
-              return window.__drPatilPdfDiagnostics;
-            }
-            show('PDF diagnostic 1/3: JavaScript loaded. Checking PDF library and Android service…',false);
-            function connect(){
-              try{
-                if(window.AndroidPrint&&typeof window.AndroidPrint.ping==='function'&&window.AndroidPrint.ping()==='DR_PATIL_PDF_BRIDGE_READY_V2'&&typeof window.AndroidPrint.print==='function'&&typeof window.AndroidPrint.sharePdf==='function'&&typeof window.html2pdf==='function'){
-                  state='connected';window.__drPatilPdfBridgeState=state;
-                  window.print=function(){
-                    if(busy){show('PDF is being created. Please wait.',false);return;}
-                    if(state!=='connected'){show('Android PDF service is not connected. Close and reopen the app.',true);return;}
-                    var area=document.getElementById('printArea');
-                    var page=area&&area.querySelector('.letter-page');
-                    if(!page){show('Patient document was not found in the print area.',true);return;}
-                    if((window._opdPrintMode||'digital')==='physical'){
-                      show('Opening print dialog for pre-printed letterhead…',false);
-                      try{window.AndroidPrint.print();}catch(e){show('Physical printing failed: '+String(e),true);}finally{window._opdPrintMode='digital';}return;
-                    }
-                    busy=true;show('Creating patient PDF…',false);
-                    var oldStyle=area.getAttribute('style');
-                    var css=document.createElement('style');css.id='dr-patil-pdf-layout-v2';
-                    css.textContent=collectV25PrintStyles();
-                    function collectV25PrintStyles(){
-                      var output=[];
-                      function visit(rules,insidePrint){
-                        for(var i=0;i<rules.length;i++){
-                          var rule=rules[i];
-                          if(rule.type===CSSRule.MEDIA_RULE){
-                            var mediaText=(rule.conditionText||(rule.media&&rule.media.mediaText)||'').toLowerCase();
-                            visit(rule.cssRules,insidePrint||/(^|,)\s*print\b/.test(mediaText));
-                          }else if(insidePrint&&rule.type!==CSSRule.PAGE_RULE){
-                            output.push(rule.cssText);
-                          }
-                        }
-                      }
-                      Array.prototype.forEach.call(document.styleSheets,function(sheet){
-                        try{visit(sheet.cssRules,false);}catch(e){}
-                      });
-                      if(!output.length)throw new Error('The original V25 A4 print stylesheet could not be loaded');
-                      return output.join('\n');
-                    }
-                    async function run(){
-                      try{
-                        document.head.appendChild(css);area.style.display='block';area.style.position='fixed';area.style.left='0';area.style.top='0';area.style.zIndex='2147483000';area.style.width='210mm';area.style.margin='0';area.style.padding='0';area.style.background='#fff';area.style.opacity='.01';area.style.pointerEvents='none';
-                        await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
-                        if(document.fonts&&document.fonts.ready)await document.fonts.ready;
-                        var bg=page.querySelector('.letter-bg');
-                        if(bg&&!bg.complete)await new Promise((resolve,reject)=>{bg.onload=resolve;bg.onerror=()=>reject(new Error('Letterhead image did not load'));});
-                        if(bg&&bg.decode)await bg.decode();
-                        var clinical=page.querySelector('.letter-clinical');if(!clinical)throw new Error('Clinical note area is missing');
-                        var fs=8.8;while(clinical.scrollHeight>clinical.clientHeight+1&&fs>7){fs=Math.max(7,fs-.2);clinical.style.fontSize=fs+'pt';clinical.querySelectorAll('p,h3').forEach(n=>n.style.fontSize=(fs+(n.tagName==='H3'?.1:0))+'pt');}
-                        if(clinical.scrollHeight>clinical.clientHeight+2)throw new Error('Note is too long for the letterhead writing area');
-                        var result=await window.html2pdf().set({margin:0,image:{type:'jpeg',quality:.98},html2canvas:{scale:2,useCORS:true,backgroundColor:'#fff',logging:false,scrollX:0,scrollY:0,windowWidth:794,windowHeight:1123,onclone:function(doc){var a=doc.getElementById('printArea');if(a){a.style.opacity='1';a.style.position='static';a.style.left='auto';a.style.top='auto';a.style.zIndex='auto';}}},jsPDF:{unit:'mm',format:'a4',orientation:'portrait'},pagebreak:{mode:['css','legacy']}}).from(page).outputPdf('datauristring');
-                        var comma=result.indexOf(',');if(comma<0)throw new Error('PDF generator returned invalid data');
-                        var base64=result.substring(comma+1);if(!base64||base64.length<1000)throw new Error('Generated PDF is empty');
-                        var nameNode=page.querySelector('.letter-patient .name');var patient=nameNode?nameNode.textContent.trim():'Patient';
-                        show('PDF generated. Opening share options…',false);window.AndroidPrint.sharePdf(base64,patient||'Patient');
-                      }catch(e){show('PDF creation failed: '+(e&&e.message?e.message:String(e)),true);alert('Could not create patient PDF: '+(e&&e.message?e.message:String(e)));}
-                      finally{if(oldStyle===null)area.removeAttribute('style');else area.setAttribute('style',oldStyle);if(css.parentNode)css.parentNode.removeChild(css);busy=false;}
-                    }
-                    run();
-                  };
-                  show('PDF diagnostic 3/3: JavaScript, PDF library and Android bridge connected.',false);return true;
-                }
-              }catch(e){state='error';window.__drPatilPdfBridgeState=state;show('PDF bridge error: '+String(e),true);}
-              return false;
-            }
-            window.__drPatilPdfBridgeState=state;
-            window.print=function(){show('Android PDF service is not connected. Close and reopen the app.',true);alert('Android PDF service is not connected. Please close and reopen the OPD app.');};
-            function start(){
-              var d=diagnostics();
-              if(!d.html2pdfLoaded)show('PDF diagnostic 1/3: JavaScript loaded, but html2pdf library is MISSING.',true);
-              else if(!d.androidObjectPresent)show('PDF diagnostic 2/3: JavaScript and PDF library loaded; Android bridge is NOT PRESENT.',true);
-              else if(!d.androidPingReady)show('PDF diagnostic 2/3: Android bridge object exists, but its ping check FAILED.',true);
-              else show('PDF diagnostic: JavaScript, PDF library and Android ping detected. Checking methods…',false);
-              if(connect()||timer)return;
-              timer=setInterval(function(){attempts++;var d=diagnostics();
-                if(connect()){clearInterval(timer);timer=null;}
-                else if(attempts>=100){clearInterval(timer);timer=null;state='timeout';window.__drPatilPdfBridgeState=state;
-                  if(!d.html2pdfLoaded)show('PDF diagnostic FAILED: html2pdf library did not load.',true);
-                  else if(!d.androidObjectPresent)show('PDF diagnostic FAILED: AndroidPrint interface was never injected into WebView.',true);
-                  else if(!d.androidPingReady)show('PDF diagnostic FAILED: AndroidPrint.ping() did not return the expected response.',true);
-                  else show('PDF diagnostic FAILED: Android bridge methods or PDF connection check failed.',true);
-                }
-              },250);
-            }
-            if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',start,{once:true});else start();
-            document.addEventListener('visibilitychange',function(){if(!document.hidden&&state!=='connected')start();});
+            function getJsPDF(){return window.jspdf&&window.jspdf.jsPDF;}
+            function diagnostics(){var c=typeof window.html2canvas==='function',j=typeof getJsPDF()==='function',a=!!window.AndroidPrint,p=false;try{p=!!(a&&typeof AndroidPrint.ping==='function'&&AndroidPrint.ping()==='DR_PATIL_PDF_BRIDGE_READY_V2');}catch(e){}window.__drPatilPdfDiagnostics={javascriptLoaded:true,html2canvasLoaded:c,jspdfLoaded:j,androidObjectPresent:a,androidPingReady:p};return window.__drPatilPdfDiagnostics;}
+            function collectV25PrintStyles(){var out=[];function visit(rules,inside){for(var i=0;i<rules.length;i++){var r=rules[i];if(r.type===CSSRule.MEDIA_RULE){var mt=(r.conditionText||(r.media&&r.media.mediaText)||'').toLowerCase();visit(r.cssRules,inside||/(^|,)\s*print\b/.test(mt));}else if(inside&&r.type!==CSSRule.PAGE_RULE)out.push(r.cssText);}}Array.prototype.forEach.call(document.styleSheets,function(sh){try{visit(sh.cssRules,false);}catch(e){}});if(!out.length)throw new Error('Original V25 A4 print stylesheet could not be loaded');return out.join('\n');}
+            show('PDF diagnostic: checking flattened PDF libraries and Android service…',false);
+            function connect(){try{if(!(window.AndroidPrint&&typeof AndroidPrint.ping==='function'&&AndroidPrint.ping()==='DR_PATIL_PDF_BRIDGE_READY_V2'&&typeof AndroidPrint.print==='function'&&typeof AndroidPrint.sharePdf==='function'&&typeof window.html2canvas==='function'&&typeof getJsPDF()==='function'))return false;
+              state='connected';window.__drPatilPdfBridgeState=state;
+              window.print=function(){if(busy){show('PDF is being created. Please wait.',false);return;}var area=document.getElementById('printArea'),page=area&&area.querySelector('.letter-page');if(!page){show('Patient document was not found in the print area.',true);return;}
+                if((window._opdPrintMode||'digital')==='physical'){show('Opening print dialog for pre-printed letterhead…',false);try{AndroidPrint.print();}catch(e){show('Physical printing failed: '+e,true);}finally{window._opdPrintMode='digital';}return;}
+                busy=true;show('Creating flattened A4 patient PDF…',false);var oldArea=area.getAttribute('style'),oldPage=page.getAttribute('style'),css=document.createElement('style');css.id='dr-patil-pdf-layout-v3';
+                (async function(){try{css.textContent=collectV25PrintStyles();document.head.appendChild(css);area.style.cssText+=';display:block;position:fixed;left:0;top:0;z-index:2147483000;width:210mm;margin:0;padding:0;background:#fff;opacity:1;pointer-events:none';page.style.cssText+=';opacity:1;visibility:visible;display:block;width:210mm;height:297mm;margin:0;transform:none';await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));if(document.fonts&&document.fonts.ready)await document.fonts.ready;
+                  var bg=page.querySelector('.letter-bg');if(bg){if(!bg.complete)await new Promise((r,j)=>{bg.onload=r;bg.onerror=()=>j(new Error('Letterhead image failed to load'));});if(bg.decode)await bg.decode();}
+                  var clinical=page.querySelector('.letter-clinical');if(!clinical)throw new Error('Clinical note area is missing');var fs=8.8;while(clinical.scrollHeight>clinical.clientHeight+1&&fs>7){fs=Math.max(7,fs-.2);clinical.style.fontSize=fs+'pt';clinical.querySelectorAll('p,h3').forEach(n=>n.style.fontSize=(fs+(n.tagName==='H3'?.1:0))+'pt');}if(clinical.scrollHeight>clinical.clientHeight+2)throw new Error('Note is too long for the letterhead writing area');
+                  var canvas=await html2canvas(page,{scale:2,useCORS:true,allowTaint:false,backgroundColor:'#fff',logging:false,scrollX:0,scrollY:0,windowWidth:Math.max(document.documentElement.clientWidth,794),windowHeight:Math.max(document.documentElement.clientHeight,1123)});if(!canvas||canvas.width<500||canvas.height<700)throw new Error('Prescription page capture failed');var data=canvas.getContext('2d').getImageData(0,0,canvas.width,canvas.height).data,nonwhite=0,step=Math.max(4,Math.floor(data.length/20000/4)*4);for(var i=0;i<data.length;i+=step){if(data[i]<245||data[i+1]<245||data[i+2]<245){nonwhite++;if(nonwhite>20)break;}}if(nonwhite<10)throw new Error('Captured prescription is blank; PDF was not shared');
+                  var img=canvas.toDataURL('image/jpeg',.96);if(img.length<10000)throw new Error('Captured page image is empty');var PDF=getJsPDF(),pdf=new PDF({orientation:'portrait',unit:'mm',format:'a4',compress:true});pdf.addImage(img,'JPEG',0,0,210,297,undefined,'FAST');if(pdf.internal.getNumberOfPages()!==1)throw new Error('PDF is not exactly one A4 page');var uri=pdf.output('datauristring'),comma=uri.indexOf(',');if(comma<0)throw new Error('Invalid PDF data');var base64=uri.substring(comma+1);if(base64.length<10000)throw new Error('PDF output is empty');var nm=page.querySelector('.letter-patient .name'),patient=nm?nm.textContent.trim():'Patient';window.__drPatilLastPdfDiagnostics={width:canvas.width,height:canvas.height,nonWhitePixelSampleCount:nonwhite,pdfPages:1,base64Length:base64.length};show('Flattened PDF generated. Opening share options…',false);AndroidPrint.sharePdf(base64,patient||'Patient');
+                }catch(e){show('PDF creation failed: '+(e&&e.message?e.message:String(e)),true);alert('Could not create patient PDF: '+(e&&e.message?e.message:String(e)));}finally{if(oldArea===null)area.removeAttribute('style');else area.setAttribute('style',oldArea);if(oldPage===null)page.removeAttribute('style');else page.setAttribute('style',oldPage);if(css.parentNode)css.remove();busy=false;}})();};
+              show('PDF diagnostic: flattened PDF scripts and Android bridge connected.',false);return true;}catch(e){show('PDF bridge error: '+e,true);return false;}}
+            window.__drPatilPdfBridgeState=state;window.print=function(){show('Android PDF service is not connected. Close and reopen the app.',true);};
+            function start(){var d=diagnostics();if(connect())return;var n=0;if(timer)return;timer=setInterval(function(){n++;if(connect()||n>=100){clearInterval(timer);timer=null;if(n>=100&&window.__drPatilPdfBridgeState!=='connected')show('PDF service or required PDF library did not connect.',true);}},250);}
+            if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',start,{once:true});else start();document.addEventListener('visibilitychange',function(){if(!document.hidden&&state!=='connected')start();});
           })();
           </script>'''
-          if '</body>' not in s: raise SystemExit('V25 closing body tag missing')
+
           s=s.replace('</body>',bridge+'\n</body>',1)
           p.write_text(s,encoding='utf-8')
-          checks=['src="html2pdf.bundle.min.js"','id="dr-patil-pdf-generator-v2"','PDF diagnostic 1/3: JavaScript loaded','javascriptLoaded:true','DR_PATIL_PDF_BRIDGE_READY_V2','window.AndroidPrint.sharePdf(base64','window.AndroidPrint.print()','collectV25PrintStyles()','css.textContent=collectV25PrintStyles();','id="print"','id="share"','id="printFollowup"','data-print-fu','data-direct-preview','data-preop-preview']
+          checks=['src="html2canvas.min.js"','src="jspdf.umd.min.js"','id="dr-patil-pdf-generator-v3"','html2canvas(page',"pdf.addImage(img,'JPEG',0,0,210,297",'AndroidPrint.sharePdf(base64','AndroidPrint.print()','id="print"','id="share"','id="printFollowup"','data-print-fu','data-direct-preview','data-preop-preview']
           missing=[x for x in checks if x not in s]
-          if missing: raise SystemExit('PDF bridge verification failed: '+', '.join(missing))
+          if missing: raise SystemExit('Flattened PDF bridge verification failed: '+', '.join(missing))
           scripts=re.findall(r'<script\b[^>]*>(.*?)</script\s*>',s,re.I|re.S)
           Path('/tmp/drpatil-v25-scripts.js').write_text('\n;\n'.join(x for x in scripts if x.strip()),encoding='utf-8')
-          print('All existing V25 digital PDF routes now generate a PDF and open Android share/save options.')
+          print('Flattened PDF integration injected without editing the original V25 source.')
           PY
-
 
       - name: Copy injected V25 web assets into Android project
         shell: bash
@@ -345,11 +265,11 @@ jobs:
           npx cap copy android
           WEB=android/app/src/main/assets/public
           test -s "$WEB/index.html"
-          test -s "$WEB/html2pdf.bundle.min.js"
-          grep -q 'id="dr-patil-pdf-generator-v2"' "$WEB/index.html"
-          grep -q 'PDF diagnostic 1/3: JavaScript loaded' "$WEB/index.html"
-          grep -q 'window.AndroidPrint.sharePdf(base64' "$WEB/index.html"
-          echo 'Verified: injected V25 PDF JavaScript and html2pdf library copied into Android assets.'
+          test -s "$WEB/html2canvas.min.js"
+          test -s "$WEB/jspdf.umd.min.js"
+          grep -q 'id="dr-patil-pdf-generator-v3"' "$WEB/index.html"
+          grep -q 'AndroidPrint.sharePdf(base64' "$WEB/index.html"
+          echo 'Verified: flattened PDF scripts and Android bridge copied into Android assets.'
 
       - name: Verify source preservation and JavaScript syntax
         shell: bash
@@ -360,14 +280,14 @@ jobs:
           from pathlib import Path
           original=Path('DrPatil_Digital_OPD_V25_Final.html').read_text(encoding='utf-8')
           built=Path('www/index.html').read_text(encoding='utf-8')
-          marker='<script id="dr-patil-pdf-generator-v2">'
+          marker='<script id="dr-patil-pdf-generator-v3">'
           assert built.count(marker)==1,'PDF bridge script count is not one'
           start=built.index(marker);end=built.index('</script>',start)+len('</script>')
           stripped=built[:start]+built[end:]
-          stripped=stripped.replace('<script src="html2pdf.bundle.min.js"></script>\n','',1)
+          stripped=stripped.replace('<script src="html2canvas.min.js"></script>\n<script src="jspdf.umd.min.js"></script>\n','',1)
           stripped=stripped.replace('\n</body>','</body>',1)
           if stripped!=original: raise SystemExit('V25 source changed beyond the PDF additions')
-          assert Path('www/html2pdf.bundle.min.js').is_file()
+          assert Path('www/html2canvas.min.js').is_file() and Path('www/jspdf.umd.min.js').is_file()
           print('V25 preservation and JavaScript syntax checks passed.')
           PY
 
@@ -395,7 +315,7 @@ jobs:
             });
             await page.goto('http://127.0.0.1:4173/index.html', { waitUntil: 'load' });
             await page.waitForFunction(() => window.__drPatilPdfBridgeState === 'connected', null, { timeout: 30000 });
-            await page.waitForFunction(() => typeof window.html2pdf === 'function', null, { timeout: 30000 });
+            await page.waitForFunction(() => typeof window.html2canvas === 'function' && !!(window.jspdf && window.jspdf.jsPDF), null, { timeout: 30000 });
 
             const routeInfo = await page.evaluate(() => ({
               consultationPrint: !!document.getElementById('print'),
@@ -429,15 +349,19 @@ jobs:
             }));
             const pdf = Buffer.from(result.encoded, 'base64');
             if (pdf.subarray(0, 4).toString() !== '%PDF') throw new Error('PDF output does not have a valid PDF signature');
-            if (pdf.length < 1500) throw new Error('Generated PDF is unexpectedly small: ' + pdf.length);
+            if (pdf.length < 10000) throw new Error('Generated PDF is unexpectedly small: ' + pdf.length);
+            require('fs').writeFileSync('/tmp/drpatil-generated-smoke.pdf', pdf);
             if (result.patient !== 'PDF Smoke Test') throw new Error('Patient name was not passed to the native share bridge');
+            if (!result.diagnostics || !result.diagnostics.html2canvasLoaded || !result.diagnostics.jspdfLoaded) throw new Error('PDF library diagnostics failed');
+            const capture = await page.evaluate(() => window.__drPatilLastPdfDiagnostics);
+            if (!capture || capture.width < 500 || capture.height < 700 || capture.nonWhitePixelSampleCount < 10 || capture.pdfPages !== 1) throw new Error('Flattened capture checks failed: ' + JSON.stringify(capture));
             if (pageErrors.length) throw new Error('Browser JavaScript errors: ' + pageErrors.join(' | '));
             console.log('V25 PDF smoke test passed:', JSON.stringify({
               routes: routeInfo,
               pdfBytes: pdf.length,
               pdfHeader: pdf.subarray(0, 8).toString(),
               patient: result.patient,
-              diagnostics: result.diagnostics
+              diagnostics: result.diagnostics, capture
             }));
             await browser.close();
           })().catch(e => { console.error(e); process.exit(1); });
@@ -447,6 +371,20 @@ jobs:
           trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
           sleep 2
           NODE_PATH="$GITHUB_WORKSPACE/node_modules" node /tmp/drpatil-pdf-smoke.cjs
+          python3 -m pip install --quiet pymupdf pillow
+          python3 - <<'PY'
+          import fitz
+          from PIL import Image, ImageStat
+          pdf=fitz.open('/tmp/drpatil-generated-smoke.pdf')
+          if len(pdf)!=1: raise SystemExit(f'Expected one PDF page, got {len(pdf)}')
+          page=pdf[0]; rect=page.rect
+          if abs(rect.width-595.28)>2 or abs(rect.height-841.89)>2: raise SystemExit(f'PDF page is not A4: {rect}')
+          pix=page.get_pixmap(matrix=fitz.Matrix(1,1),alpha=False)
+          image=Image.frombytes('RGB',[pix.width,pix.height],pix.samples)
+          if sum(ImageStat.Stat(image).stddev)<5: raise SystemExit('Rendered PDF is blank or nearly blank')
+          if len(page.get_images(full=True))<1: raise SystemExit('PDF does not contain the flattened page image')
+          print('Rendered PDF verified: one A4 page, embedded image, non-blank raster.')
+          PY
 
       - name: Verify native PDF bridge configuration
         shell: bash
@@ -494,15 +432,17 @@ jobs:
           with ZipFile(apk) as z:
               names=set(z.namelist())
               html_path='assets/public/index.html'
-              lib_path='assets/public/html2pdf.bundle.min.js'
+              canvas_path='assets/public/html2canvas.min.js'
+              jspdf_path='assets/public/jspdf.umd.min.js'
               if html_path not in names:
                   raise SystemExit('APK is missing packaged assets/public/index.html')
-              if lib_path not in names:
-                  raise SystemExit('APK is missing packaged html2pdf.bundle.min.js')
+              if canvas_path not in names or jspdf_path not in names:
+                  raise SystemExit('APK is missing html2canvas or jsPDF assets')
               html=z.read(html_path).decode('utf-8')
               required=[
-                  'id="dr-patil-pdf-generator-v2"',
-                  'PDF diagnostic 1/3: JavaScript loaded',
+                  'id="dr-patil-pdf-generator-v3"',
+                  'html2canvas(page',
+                  'pdf.addImage(img,\'JPEG\',0,0,210,297',
                   'DR_PATIL_PDF_BRIDGE_READY_V2',
                   'window.AndroidPrint.sharePdf(base64',
                   'window.AndroidPrint.print()'
@@ -510,19 +450,21 @@ jobs:
               missing=[item for item in required if item not in html]
               if missing:
                   raise SystemExit('APK packaged HTML is missing PDF integration markers: '+', '.join(missing))
-              library=z.read(lib_path)
-              if len(library) < 100000:
-                  raise SystemExit('Packaged html2pdf library is unexpectedly small')
+              canvas_lib=z.read(canvas_path)
+              jspdf_lib=z.read(jspdf_path)
+              if len(canvas_lib)<100000 or len(jspdf_lib)<100000:
+                  raise SystemExit('Packaged PDF library is unexpectedly small')
               print('FINAL APK CONTENT VERIFICATION PASSED')
               print('Packaged HTML bytes:',len(html.encode('utf-8')))
-              print('Packaged html2pdf library bytes:',len(library))
+              print('Packaged html2canvas bytes:',len(canvas_lib))
+              print('Packaged jsPDF bytes:',len(jspdf_lib))
               print('PDF JavaScript and Android bridge calls are present in the actual APK.')
           PY
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: Dr-Patil-Digital-OPD-V25-PDF-Creation-Fix
+          name: Dr-Patil-Digital-OPD-V25-Flattened-PDF
           path: android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 14
